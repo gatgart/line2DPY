@@ -24,60 +24,32 @@ parser = WebhookParser(CHANNEL_SECRET)
 def health():
     return {"ok": True, "ts": int(time.time())}
 
+# main.py
+import base64, hmac, hashlib
+
 @app.post("/callback")
-async def callback(request: Request, x_line_signature: str = Header(None, convert_underscores=False)):
-    body = await request.body()
+async def callback(request: Request, x_line_signature: str = Header(..., alias="X-Line-Signature")):
+    body_bytes = await request.body()
+    body_text = body_bytes.decode("utf-8")
+
+    # --- DEBUG: compute expected signature from our CHANNEL_SECRET
+    expected_sig = base64.b64encode(
+        hmac.new(CHANNEL_SECRET.encode("utf-8"), body_bytes, hashlib.sha256).digest()
+    ).decode("utf-8")
+
+    # พิมพ์เท่าที่จำเป็น (อย่าพิมพ์ secret)
+    print("[LINE DEBUG]",
+          "len(body)=", len(body_bytes),
+          "header_sig=", repr(x_line_signature.strip()),
+          "expected_sig=", repr(expected_sig))
+
+    # ใช้ SDK ตรวจตามปกติ
     try:
-        events: List = parser.parse(body.decode("utf-8"), x_line_signature or "")
+        events = parser.parse(body_text, x_line_signature)
     except InvalidSignatureError:
+        # แถม detail ให้อ่าน log คู่กัน
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    for event in events:
-        if isinstance(event, MessageEvent):
-            # 1) ไฟล์/มีเดีย -> ดาวน์โหลดจาก LINE แล้วอัปโหลดขึ้น Drive
-            if isinstance(event.message, (FileMessage, ImageMessage, VideoMessage, AudioMessage)):
-                try:
-                    resp = line_bot_api.get_message_content(event.message.id)  # stream response
-                    # สร้างชื่อไฟล์
-                    ct = resp.headers.get("Content-Type", "application/octet-stream")
-                    # ชื่อไฟล์จาก FileMessage ถ้ามี; ถ้าไม่มีก็เดาจาก mimetype
-                    base = getattr(event.message, "file_name", None) or f"line_{event.message.id}"
-                    ext = mimetypes.guess_extension(ct) or ""
-                    if ext == ".jpe":  # บางที guess จะคืน .jpe
-                        ext = ".jpg"
-                    filename = base if base.lower().endswith(ext) or "." in base else base + ext
-
-                    buf = io.BytesIO()
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            buf.write(chunk)
-                    buf.seek(0)
-
-                    file_meta = upload_stream(
-                        drive=drive,
-                        folder_id=GOOGLE_DRIVE_FOLDER_ID,
-                        filename=filename,
-                        content_type=ct,
-                        stream=buf
-                    )
-
-                    # ตอบกลับลิงก์ดูไฟล์
-                    link = file_meta.get("webViewLink") or file_meta.get("webContentLink") or f"https://drive.google.com/file/d/{file_meta['id']}/view"
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text=f"Uploaded ✅\n{link}")
-                    )
-                except Exception as e:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text=f"อัปโหลดไม่สำเร็จ: {e}")
-                    )
-
-            # 2) ข้อความธรรมดา -> ตอบรับ
-            elif isinstance(event.message, TextMessage):
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="ส่งรูป/ไฟล์มาได้เลย เดี๋ยวอัปขึ้น Google Drive ให้นะครับ ✅")
-                )
-
+    # ... ทำงานต่อถ้ามีอีเวนต์ ...
     return "OK"
+
