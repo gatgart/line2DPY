@@ -1,4 +1,5 @@
 # main.py
+import logging
 import os, io, hmac, hashlib, base64, mimetypes
 from fastapi import FastAPI, Request, Header, HTTPException, Response, BackgroundTasks
 from linebot import LineBotApi, WebhookParser
@@ -8,7 +9,7 @@ from linebot.models import (
     TextSendMessage
 )
 from drive_client import get_drive, upload_stream
-
+logger = logging.getLogger("app")
 app = FastAPI()
 
 # ---- ENV
