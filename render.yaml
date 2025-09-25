@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: line2drive-python
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: GOOGLE_DRIVE_FOLDER_ID
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/google-sa.json
+    secretFiles:
+      - name: google-sa.json
+        path: /etc/secrets/google-sa.json
+        # เนื้อหา JSON key ของ Service Account ใส่ใน Secret File นี้
