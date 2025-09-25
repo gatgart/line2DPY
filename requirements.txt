@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+line-bot-sdk
+google-api-python-client
+google-auth
+google-auth-httplib2
