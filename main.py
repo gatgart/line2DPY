@@ -30,6 +30,7 @@ def _safe_ext(content_type: str):
 
 def process_upload(event):
     # ดาวน์โหลดไฟล์จาก LINE
+    try:
     resp = line_bot_api.get_message_content(event.message.id)
     ct = resp.headers.get("Content-Type", "application/octet-stream")
     base = getattr(event.message, "file_name", None) or f"line_{event.message.id}"
@@ -53,6 +54,9 @@ def process_upload(event):
     to = _push_target(event.source)
     if to:
         line_bot_api.push_message(to, TextSendMessage(text=f"Uploaded ✅\n{link}"))
+     pass
+    except Exception:
+        logger.exception("upload failed") 
 
 @app.post("/callback")
 async def callback(
