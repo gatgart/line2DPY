@@ -101,7 +101,8 @@ def process_upload(event: MessageEvent):
 
         # 1) Download content stream from LINE
         resp = line_bot_api.get_message_content(event.message.id)
-        content_type = resp.headers.get("Content-Type", "application/octet-stream")
+        content_type = getattr(resp, "content_type", None) or "application/octet-stream"
+
 
         # 2) Determine filename
         base = getattr(event.message, "file_name", None) or f"line_{event.message.id}"
