@@ -14,6 +14,7 @@ import mimetypes
 from typing import Optional
 from googleapiclient.errors import HttpError
 from fastapi import FastAPI, Request, Header, HTTPException, Response, BackgroundTasks
+from fastapi.responses import JSONResponse
 
 # LINE SDK
 from linebot import LineBotApi, WebhookParser
@@ -162,6 +163,22 @@ def process_upload(event: MessageEvent):
                 line_bot_api.push_message(to, TextSendMessage(text=f"อัปโหลดไม่สำเร็จ: {e}"))
         logger.exception("process_upload failed")
 
+@app.middleware("http")
+async def catch_all(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        logger.exception("Unhandled exception during request")
+        return JSONResponse({"detail": "internal error"}, status_code=500)
+
+@app.exception_handler(Exception)
+async def all_exception_handler(request, exc):
+    logger.exception("Unhandled (exception_handler)", exc_info=exc)
+    return JSONResponse({"detail": "internal error"}, status_code=500)
+
+@app.head("/callback")
+def callback_head():
+    return Response(status_code=200)
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
@@ -188,60 +205,46 @@ def callback_get():
     return {"ok": True, "note": "LINE calls POST here"}
 
 @app.post("/callback")
-async def callback(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    x_line_signature: str = Header(..., alias="X-Line-Signature"),
-):
-    # Ensure required envs/clients
-    if not (CHANNEL_SECRET and CHANNEL_ACCESS_TOKEN and GOOGLE_DRIVE_FOLDER_ID):
-        raise HTTPException(status_code=500, detail="Server misconfigured: missing env")
-
-    _ensure_clients()
-    if parser is None or line_bot_api is None:
-        raise HTTPException(status_code=500, detail="Server misconfigured: clients not ready")
-
-    # 1) Verify signature using RAW body
-    body_bytes = await request.body()
-    expected_sig = _compute_signature(CHANNEL_SECRET, body_bytes)
-    if not hmac.compare_digest(x_line_signature.strip(), expected_sig):
-        # Optional: log a short debug line (do NOT log secrets)
-        logger.debug("Signature mismatch")
-        raise HTTPException(status_code=400, detail="Invalid signature")
-
-    # 2) Parse events (LINE's verify sends {"destination":"...","events":[]})
+async def callback(request: Request, background_tasks: BackgroundTasks,
+                   x_line_signature: str = Header(..., alias="X-Line-Signature")):
     try:
-        events = parser.parse(body_bytes.decode("utf-8"), x_line_signature)
-    except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid signature")
-    except Exception:
-        logger.exception("parser.parse failed")
-        # Do not break LINE verify; but better to surface as 400/200 based on your policy
+        if not (CHANNEL_SECRET and CHANNEL_ACCESS_TOKEN and GOOGLE_DRIVE_FOLDER_ID):
+            logger.error("Missing envs")
+            return Response(status_code=500)
+
+        _ensure_clients()
+        if parser is None or line_bot_api is None:
+            logger.error("Clients not ready")
+            return Response(status_code=500)
+
+        body = await request.body()
+        expected = _compute_signature(CHANNEL_SECRET, body)
+        if not hmac.compare_digest((x_line_signature or "").strip(), expected):
+            return Response(status_code=400)
+
+        try:
+            events = parser.parse(body.decode("utf-8"), x_line_signature)
+        except Exception:
+            # อย่าให้ verify พัง
+            logger.exception("parser.parse failed")
+            return Response(status_code=200)
+
+        for event in events:
+            if isinstance(event, MessageEvent):
+                if isinstance(event.message, (FileMessage, ImageMessage, VideoMessage, AudioMessage)):
+                    try:
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="รับไฟล์แล้ว กำลังอัปโหลด..."))
+                    except Exception:
+                        logger.warning("reply_message failed", exc_info=True)
+                    background_tasks.add_task(process_upload, event)
+                elif isinstance(event.message, TextMessage):
+                    try:
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ส่งรูป/ไฟล์มาได้เลยครับ ✅"))
+                    except Exception:
+                        logger.warning("reply_message failed", exc_info=True)
+
         return Response(status_code=200)
+    except Exception:
+        logger.exception("callback crashed")
+        return Response(status_code=200)  # ตอบ 200 เพื่อไม่ให้ LINE retryรัว ๆ
 
-    # 3) Handle events: reply fast, heavy work in background
-    for event in events:
-        if isinstance(event, MessageEvent):
-            if isinstance(event.message, (FileMessage, ImageMessage, VideoMessage, AudioMessage)):
-                # Reply immediately to keep webhook fast
-                try:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text="รับไฟล์แล้ว กำลังอัปโหลดขึ้น Google Drive..."),
-                    )
-                except LineBotApiError as e:
-                    logger.warning("reply_message failed (will still push later): %s", e)
-                # Upload in background
-                background_tasks.add_task(process_upload, event)
-
-            elif isinstance(event.message, TextMessage):
-                try:
-                    line_bot_api.reply_message(
-                        event.reply_token,
-                        TextSendMessage(text="ส่งรูป/ไฟล์มาได้เลย เดี๋ยวอัปขึ้น Google Drive ให้ครับ ✅"),
-                    )
-                except LineBotApiError as e:
-                    logger.warning("reply_message failed: %s", e)
-
-    # 4) Always return 200 for a successfully handled webhook
-    return Response(status_code=200)
