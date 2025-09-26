@@ -1,7 +1,7 @@
 fastapi==0.115.*
 uvicorn==0.32.*
+h11==0.14.*
 line-bot-sdk==3.*
 google-api-python-client==2.*
 google-auth==2.*
 google-auth-httplib2==0.2.*
-h11==0.14.*   
