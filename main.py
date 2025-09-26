@@ -3,7 +3,7 @@
 # - Verifies X-Line-Signature using raw body + CHANNEL_SECRET
 # - Replies fast to webhook; uploads to Google Drive in background
 # - Pushes Drive link back to the chat (user/group/room)
-import json
+
 import os
 import io
 import hmac
@@ -12,9 +12,8 @@ import hashlib
 import logging
 import mimetypes
 from typing import Optional
-from googleapiclient.errors import HttpError
+
 from fastapi import FastAPI, Request, Header, HTTPException, Response, BackgroundTasks
-from fastapi.responses import JSONResponse
 
 # LINE SDK
 from linebot import LineBotApi, WebhookParser
@@ -93,29 +92,30 @@ def _compute_signature(secret: str, body: bytes) -> str:
 # Background job: download from LINE -> upload to Drive -> push link
 # ------------------------------------------------------------------------------
 def process_upload(event: MessageEvent):
+    """Runs outside request/response to keep webhook snappy."""
     try:
         _ensure_clients()
         if line_bot_api is None or drive is None:
             logger.error("Clients not ready (LINE or Drive); cannot process upload.")
             return
 
-        # 1) ดึงคอนเทนต์จาก LINE (v3: Content object)
+        # 1) Download content stream from LINE
         resp = line_bot_api.get_message_content(event.message.id)
         content_type = getattr(resp, "content_type", None) or "application/octet-stream"
 
-        # 2) ตั้งชื่อไฟล์
-        base = getattr(event.message, "file_name", None) or f"line_{event.message.id}"
-        ext = _safe_ext(content_type)
-        filename = base if ("." in base) else base + ext
 
-        # 3) สตรีมลงบัฟเฟอร์
+        # 2) Determine filename
+        base = getattr(event.message, "file_name", None) or f"line_{event.message.id}"
+        filename = base if "." in base else base + _safe_ext(content_type)
+
+        # 3) Buffer -> BytesIO (you can switch to temp file if very large)
         buf = io.BytesIO()
         for chunk in resp.iter_content(1024 * 1024):
             if chunk:
                 buf.write(chunk)
         buf.seek(0)
 
-        # 4) อัปโหลดขึ้น Google Drive
+        # 4) Upload to Google Drive
         meta = upload_stream(
             drive=drive,
             folder_id=GOOGLE_DRIVE_FOLDER_ID,
@@ -128,57 +128,19 @@ def process_upload(event: MessageEvent):
             f"https://drive.google.com/file/d/{file_id}/view" if file_id else None
         )
 
-        # 5) ส่งลิงก์กลับ (push)
+        # 5) Push link back to the chat
         to = _push_target(event.source)
         if to and link:
             try:
                 line_bot_api.push_message(to, TextSendMessage(text=f"Uploaded ✅\n{link}"))
-            except LineBotApiError:
-                logger.exception("Failed to push link")
+            except LineBotApiError as e:
+                logger.exception("Failed to push link: %s", e)
         else:
             logger.warning("Missing push target or link (to=%s, link=%s)", to, link)
 
-    except HttpError as e:
-        reason = None
-        try:
-            errj = json.loads(e.content.decode() if isinstance(e.content, (bytes, bytearray)) else e.content)
-            reason = (errj.get("error", {}).get("errors") or [{}])[0].get("reason")
-        except Exception:
-            pass
-
-        to = _push_target(event.source)
-        if to:
-            if reason == "storageQuotaExceeded":
-                line_bot_api.push_message(
-                    to,
-                    TextSendMessage(
-                        text=(
-                            "อัปโหลดไม่สำเร็จ: พื้นที่ Google Drive ที่ใช้อยู่เต็ม (storageQuotaExceeded).\n"
-                            "แก้ไข: (1) ใช้โฟลเดอร์ใน Shared Drive และเพิ่ม Service Account เป็นสมาชิก หรือ "
-                            "(2) ใช้โหมด OAuth เพื่ออัปโหลดในนามบัญชีของคุณ"
-                        )
-                    ),
-                )
-            else:
-                line_bot_api.push_message(to, TextSendMessage(text=f"อัปโหลดไม่สำเร็จ: {e}"))
+    except Exception:
         logger.exception("process_upload failed")
 
-@app.middleware("http")
-async def catch_all(request, call_next):
-    try:
-        return await call_next(request)
-    except Exception:
-        logger.exception("Unhandled exception during request")
-        return JSONResponse({"detail": "internal error"}, status_code=500)
-
-@app.exception_handler(Exception)
-async def all_exception_handler(request, exc):
-    logger.exception("Unhandled (exception_handler)", exc_info=exc)
-    return JSONResponse({"detail": "internal error"}, status_code=500)
-
-@app.head("/callback")
-def callback_head():
-    return Response(status_code=200)
 # ------------------------------------------------------------------------------
 # Routes
 # ------------------------------------------------------------------------------
