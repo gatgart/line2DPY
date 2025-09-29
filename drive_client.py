@@ -3,7 +3,7 @@ from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseUpload
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 def _load_credentials():
     # โหมด Secret File (Render): ตั้ง GOOGLE_APPLICATION_CREDENTIALS ให้ชี้ไฟล์ JSON
@@ -26,8 +26,4 @@ def upload_stream(drive, folder_id: str, filename: str, content_type: str, strea
     body = {"name": filename}
     if folder_id:
         body["parents"] = [folder_id]
-    return drive.files().create(
-        body=body, media_body=media,
-        fields="id,webViewLink,webContentLink,driveId,parents",
-        supportsAllDrives=True,      # << สำคัญสำหรับ Shared Drive
-    ).execute()
+    return drive.files().create(body=body, media_body=media, fields="id,webViewLink,webContentLink").execute()
